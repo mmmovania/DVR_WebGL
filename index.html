@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<title>three.js webgl - volume rendering example</title>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+ 	<style>
+	    html{height:100%}
+		body {
+			font-family: Monospace;
+			background-color: #000;
+			color: #fff;
+			margin: 0px;
+			overflow: hidden;
+			height:100%
+		}
+		#info {
+			color: #fff;
+			position: absolute;
+			top: 10px;
+			width: 100%;
+			text-align: center;
+			z-index: 5;
+			display:block;
+		}
+		.dg {
+			z-index: 10 !important;
+		}
+		#info a, .button { color: #f00; font-weight: bold; text-decoration: underline; cursor: pointer }
+		#inset  {
+			width: 150px;
+			height: 150px;
+			background-color: transparent; /* or transparent; will show through only if renderer alpha: true */
+			border: none; /* or none; */
+			margin: 0;
+			padding: 0px;
+			position: absolute;
+			left: 20px;
+			bottom: 20px;
+			z-index: 100;
+		}
+		
+	</style> 
+</head>
+
+<body onload="init();" oncontextmenu="return false;">
+<!--
+	<div id="info">
+		<a href="http://threejs.org" target="_blank" rel="noopener">three.js</a> - Float volume render test (mip / isosurface)
+	</div>
+	<div id="inset"></div>-->
+	
+	<!-- js libs -->
+	<script src="js/three.js"></script>
+	<script src="js/controls/OrbitControls.js"></script>  
+	<script src="js/WebGL.js"></script> 
+	<script src="js/TF_Editor.js"></script>
+	<script src="js/jscolor/jscolor.js"></script>
+    <script src="js/rgbcolor.js"></script>
+	<script src="js/libs/dat.gui.min.js"></script>
+	<!-- Shaders -->
+	<script id="vs" type="x-shader/x-vertex">
+	uniform vec3 u_size;
+	varying vec3 dataTextureCoord; 
+	varying vec3 geomPos; 
+	
+	void main()
+	{
+		vec4 position4 = vec4(position, 1.0); 
+		geomPos = position;
+		dataTextureCoord = position / u_size + vec3(0.5, 0.5, 0.5);
+		gl_Position = projectionMatrix * viewMatrix * modelMatrix * position4; 
+	}
+	</script>
+	<script id="fs" type="x-shader/x-fragment">
+		precision highp float;
+        precision mediump 	sampler3D;
+     
+        uniform sampler3D 	u_data;
+		uniform vec3 		u_size;
+		uniform sampler2D 	u_cmdata;
+		uniform vec3        u_cameraPos;
+		
+		varying vec3 dataTextureCoord;
+		varying vec3 geomPos;
+		
+		 
+		#define T 0.999999998
+		
+		/*float sign(float val)
+		{
+			if (val == 0.0) 
+				return 0.0;
+            return val > 0.0 ? 1.0 : -1.0;
+		}*/
+		
+		void main()
+		{ 
+			vec3 texMin = vec3(0.0, 0.0, 0.0); 
+			vec3 texMax = vec3(1.0, 1.0, 1.0);
+			//vec3 cameraPos = viewMatrix[3].xyz;
+			//gl_FragColor.rgb = dataTextureCoord;
+			//return;
+			//gl_FragColor = vec4(1,0,0,1);
+			//return;
+			
+			vec3 step = 1.0 / u_size; 
+			vec3 dataPos = dataTextureCoord;
+			vec3 geomDir = normalize(geomPos - u_cameraPos); 
+			vec3 dirStep = geomDir * step; 
+			
+			//gl_FragColor.rgb = geomDir;
+			//return;
+			
+			//gl_FragColor = texture2D(u_cmdata, dataTextureCoord.xy);
+			//return;
+						
+			//gl_FragColor = texture2D(u_cmdata, dataTextureCoord.xy).aaaa;
+			//return;
+			
+			 
+			vec4 fragColor = vec4(0.0); 
+			bool stop = false; 
+			
+			for (int i = 0; i < 250; i++) 
+			{
+				// advance ray by step
+				dataPos = dataPos + dirStep;
+				
+				// stop condition
+				stop = dot(sign(dataPos-texMin),sign(texMax-dataPos)) < 3.0;
+				if (stop) 
+					break;
+				
+				// data fetching and transfer function evaluation
+				vec4 myIndex = texture(u_data, dataPos);
+				vec4 myColor = texture2D(u_cmdata, vec2(myIndex.x, 0.5));
+				
+				//workaround for colormap having no alpha in image
+				//myColor.a = myIndex.x;
+				
+				// opacity calculation
+				float prev_alpha = myColor.a - (myColor.a * fragColor.a);
+				fragColor.rgb = prev_alpha * myColor.rgb + fragColor.rgb; 
+				fragColor.a += prev_alpha; 
+
+
+				if(fragColor.a > T)
+				{ 
+					break;
+				}
+			} 
+			if (fragColor.a < 0.05)
+                discard;
+			gl_FragColor = fragColor;   
+		}		
+	</script>
+	
+	<script>
+
+		if ( WEBGL.isWebGL2Available() === false ) {
+
+			document.body.appendChild( WEBGL.getWebGL2ErrorMessage() );
+
+		}
+
+		let container,
+			renderer,
+			scene,
+			camera,
+			controls,
+			material,
+			volconfig,
+			cmtextures;
+			
+		let ctx, ctx2, tfCanvas;
+		 
+        let tf = undefined;
+		let rightPanel;
+		
+		//let img;
+		
+		
+       /* let tfLeft = 10;
+        let tfTop  = 512-105;
+        let tfWidth = 256;
+        let tfHeight = 100;*/
+		
+		let xLength = 256.0;
+		let yLength = 256.0;
+		let zLength = 256.0;
+		//'models/raw/Bonsai_256x256x256.raw',
+				//'models/raw/Engine_256x256x256.raw', 
+				//'models/raw/InnerEar_128x128x128.raw',
+				//'models/raw/CTData.raw';
+				//'models/raw/TeddyBear_128x128x128.raw';
+		let volume_filename =  'models/raw/CTData.raw';
+		let current_preset;
+		 
+
+		function init() {
+		 
+			current_preset = document.getElementById('presets');
+			
+			THREE.Cache.enabled = true;
+			
+			// Material 
+			scene = new THREE.Scene();
+			let loader = new THREE.FileLoader();
+			loader.setResponseType( 'arraybuffer' );
+			
+			
+			//console.log(shader.vertexShader);
+			//console.log("=====================================");
+			//console.log(document.getElementById( 'vs' ).textContent);
+					
+			//load a text file and output the result to the console
+			loader.load(
+				// resource URL 
+				volume_filename,
+				
+				// onLoad callback
+				function ( data ) {
+					// output the text to the console
+					//console.log( data ) 
+					let texture = new THREE.DataTexture3D( new Uint8Array(data), xLength, yLength, zLength );
+					texture.format = THREE.RedFormat;
+					texture.type = THREE.UnsignedByteType;//THREE.FloatType;
+					texture.minFilter = texture.magFilter = THREE.LinearFilter;
+					texture.unpackAlignment = 1;
+					texture.needsUpdate = true;
+					
+					//let uniforms = THREE.UniformsUtils.clone( shader.uniforms );
+					let uniforms= 
+					{
+						"u_size": { value: new THREE.Vector3( 1, 1, 1 ) },
+						"u_data": { value: null },
+						"u_cmdata": { value: null },
+						"u_cameraPos": { value: new THREE.Vector3(0,0,0)}
+					}
+
+					uniforms[ "u_data" ].value = texture;
+					uniforms[ "u_size" ].value.set( xLength, yLength, zLength );
+				
+					material = new THREE.ShaderMaterial( {
+					uniforms: uniforms, 
+					vertexShader: document.getElementById( 'vs' ).textContent,  
+					fragmentShader: document.getElementById( 'fs' ).textContent,
+					 
+				} );
+				
+					// Mesh
+					let geometry = new THREE.BoxBufferGeometry( xLength, yLength, zLength );
+					//geometry.translate( xLength / 2 - 0.5, yLength / 2 - 0.5, zLength / 2 - 0.5 );
+					 
+					/*
+					material.blending = THREE.CustomBlending;
+					material.blendSrc = THREE.OneFactor;    // output of shader must be premultiplied
+					material.blendDst = THREE.OneMinusSrcAlphaFactor;
+					material.blendEquation = THREE.AddEquation;
+	*/
+					let mesh = new THREE.Mesh( geometry, material );
+					scene.add( mesh );
+					updateUniforms(); 
+				},
+
+				// onProgress callback
+				function ( xhr ) {
+					console.log( (xhr.loaded / xhr.total * 100) + '% loaded' );
+				},
+
+				// onError callback
+				function ( err ) {
+					console.error( 'An error happened' );
+				}
+			);
+			
+
+			// Create renderer
+			let mem_canvas = document.createElement( 'canvas' ); //for transfer function output
+			//mem_canvas.style.display="none"; //hide the transfer function output canvas
+			//mem_canvas.style.background='black';
+			mem_canvas.width=256;
+			mem_canvas.height=1;
+			
+			
+			ctx2 = mem_canvas.getContext("2d"); 
+			
+			//img = new Image();
+			
+			//mem_canvas.style.border ="black 1px solid";
+			
+			let canvas = document.getElementById("renderCanvas");
+			let context = canvas.getContext( 'webgl2' );
+			tfCanvas = document.getElementById("tfCanvas"); 
+			
+			tfCanvas.addEventListener( 'mousedown', onMouseDown, false );
+	        tfCanvas.addEventListener( 'mousemove', onMouseMove, false );
+	        tfCanvas.addEventListener( 'mouseup', onMouseUp, false );
+			tfCanvas.addEventListener( 'mouseleave', onMouseLeave, false );
+			
+			//tfCanvas.style.border ="black 1px solid";
+			ctx = tfCanvas.getContext("2d");
+			
+			//create the background texture pattern
+	        let imageObj = new Image();
+            imageObj.src = "textures/checker2.gif";
+            imageObj.onload = function() 
+			{
+                pattern = ctx.createPattern(imageObj, "repeat");    
+				
+				let tfLeft = 10;
+				let tfTop = 10;
+				let tfWidth = tfCanvas.width-20;
+				let tfHeight = tfCanvas.height-35;
+				//console.log("L: "+tfLeft+" ,T: "+tfTop+", W: "+tfWidth+	", H: "+tfHeight);
+				tf = new TF_Editor(tfLeft, tfTop, tfWidth, tfHeight, pattern);
+				//tf.addPoint(tfLeft, 'rgba(0,0,255,0.0)');
+				//tf.addPoint(tfLeft+tfWidth/2, 'rgba(0,255,0,0.5)');
+				//tf.addPoint(tfLeft+tfWidth, 'rgba(255,0,0,1.0)');
+				
+				//tf.loadPreset(tf.TF_Presets.MEVIS);
+				tf.loadPreset(tf.TF_Presets.GRAY);
+				draw();	
+
+				//tf.copyTextureToContext(ctx2, 256, 1);
+
+				
+				let imgData = ctx2.getImageData(0, 0, 256, 1);				
+				tf.copyTextureToContextData(imgData.data);
+				ctx2.putImageData(imgData, 0, 0);
+							
+			}  
+			 
+			
+			rightPanel = document.getElementById('rightPanel');
+			
+			renderer = new THREE.WebGLRenderer( { canvas: canvas, context: context  } ); 
+			renderer.setPixelRatio( window.devicePixelRatio );
+			renderer.setSize( rightPanel.offsetWidth, rightPanel.offsetHeight );  
+			
+			
+			//document.body.appendChild( renderer.domElement );
+			rightPanel.appendChild( renderer.domElement );
+			
+			// Create camera (The volume renderer does not work very well with perspective yet)
+			let h = 512; // frustum height
+			let aspect = rightPanel.offsetWidth / rightPanel.offsetHeight;
+			
+			camera = new THREE.PerspectiveCamera( 45, aspect, 1, 1000 );
+						 
+			//for most datasets
+			camera.position.set( 0, 0, 500 );
+			camera.up.set( 0, 0, -1 ); // In our data, -z is up
+			
+			//for engine 
+			//camera.position.set( 0, 256, 0 );
+			//camera.up.set( 0, 1, 0 ); // In our data, z is up
+			
+			//for bonsai
+			//camera.position.set( 0, 256, 0 );
+			//camera.up.set( 0, -1, 0 ); // In our data, z is up
+
+			// Create controls
+			controls = new THREE.OrbitControls( camera, renderer.domElement );
+			controls.addEventListener( 'change', render ); 
+			controls.minZoom = 0.5;
+			controls.maxZoom = 4;
+			controls.update();
+
+
+			// scene.add( new THREE.AxesHelper( 128 ) );
+
+			// Lighting is baked into the shader a.t.m.
+			// let dirLight = new THREE.DirectionalLight( 0xffffff );
+
+			// The gui for interaction
+			volconfig = { colormap: 'viridis' };
+			let gui = new dat.GUI(); 
+			gui.add( volconfig, 'colormap', { 	gray: 'gray', 
+												viridis: 'viridis', 
+												mevis: 'mevis',
+												editor: 'editor'} ).onChange( updateUniforms ); 
+
+			 
+				// Colormap textures
+				cmtextures = 
+				{
+					viridis: new THREE.TextureLoader().load( 'textures/cm_viridis_T.png', render ),
+					gray: new THREE.TextureLoader().load( 'textures/cm_gray_T.png', render ),
+					mevis: new THREE.TextureLoader().load( 'textures/cm_mevis_new.png', render ),
+					editor: new THREE.Texture(ctx2.canvas)
+				};
+   
+				//cmtextures[ 'editor' ].premultiplyAlpha = true;		
+				cmtextures[ 'editor' ].needsUpdate = true;
+				
+				
+				render();
+
+			 
+
+			window.addEventListener( 'resize', onWindowResize, false );
+
+		}
+
+		function draw() 
+		{           
+            ctx.clearRect (0, 0 , tfCanvas.width , tfCanvas.height );
+            
+			if(tf != undefined)
+			{
+				tf.draw(ctx);	 
+			} 	
+
+			//debug texture
+			//ctx.drawImage(ctx2.canvas,0,50);		
+        }  
+		
+		function updateUniforms() 
+		{  
+			material.uniforms[ "u_cmdata" ].value = cmtextures[ volconfig.colormap ];
+			material.uniforms["u_cameraPos"].value = camera.position;			
+			
+			render();
+		}
+
+		function onWindowResize() 
+		{
+			renderer.setSize( rightPanel.offsetWidth, rightPanel.offsetHeight );
+
+			let aspect = rightPanel.offsetWidth / rightPanel.offsetHeight;
+
+			let frustumHeight = camera.top - camera.bottom;
+
+			camera.left = - frustumHeight * aspect / 2;
+			camera.right = frustumHeight * aspect / 2;
+
+			camera.updateProjectionMatrix();
+
+			render();
+		}
+
+		function render() 
+		{
+			renderer.render(scene, camera);
+		}
+
+		//mouse events
+        function onMouseDown( event ) 
+		{
+		    event.preventDefault();
+		    			
+			//if(current_preset.selectedIndex!=0)
+			//   return;
+		    
+ 		    //0 left mouse button
+		    //1 middle mouse button
+		    //2 right mouse button		     
+
+		    let mouseX = event.clientX -  tfCanvas.offsetLeft;
+		    let mouseY = event.clientY -  tfCanvas.offsetTop;
+     
+		    oldY = event.clientY;
+			
+			/*if(current_preset.selectedIndex != 0)
+			{
+				//load current preset points
+				tf.loadPreset(current_preset.selectedIndex);
+				let imgData = ctx2.getImageData(0, 0, 256, 1);	
+				tf.copyTextureToContextData(imgData.data);
+				ctx2.putImageData(imgData, 0, 0);
+				
+				
+				
+				cmtextures[ 'editor' ].needsUpdate = true;			
+				render(); 
+			}*/
+			
+			current_preset.selectedIndex = 0; //change to custom preset	
+			
+			tf.onMouseDown(event, mouseX, mouseY);	
+			
+			
+			draw();
+        }
+		
+        function onMouseUp( event ) 
+		{
+		    event.preventDefault();
+ 			if(current_preset.selectedIndex == 0)
+			{
+			   tf.copyCustomPoints();
+			}
+			tf.onMouseUp(event);
+			
+			///let imgData = ctx2.getImageData(0, 0, 256, 1);
+			
+			//tf.copyTextureToContext(ctx2, 256, 1);	
+			let imgData = ctx2.getImageData(0, 0, 256, 1);				
+			tf.copyTextureToContextData(imgData.data);
+			ctx2.putImageData(imgData, 0, 0);
+						
+			cmtextures[ 'editor' ].needsUpdate = true;
+			
+			/*imgData = ctx2.getImageData(0, 0, 256, 1);
+			
+			let i;
+			for (i = 0; i < imgData.data.length; i += 4) {
+			  console.log("R:"+ imgData.data[i] + ",G: "+ imgData.data[i + 1]+",B: "+ imgData.data[i + 2] +",A: "+ imgData.data[i + 3]);
+			}*/
+			
+			/*let i;
+			for (i = 0; i < imgData.data.length; i += 4) {
+			  imgData.data[i]*= imgData.data[i+3];
+			  imgData.data[i + 1]*= imgData.data[i+3];
+			  imgData.data[i + 2]*= imgData.data[i+3];
+			}
+			ctx2.putImageData(imgData, 0, 0);*/
+			
+			//img.src = imgData;
+			//ctx2.drawImage(img, 0, 0); 
+			
+			//ctx.putImageData(imgData, 0, 50);
+			
+			//updateUniforms();
+			render();
+        }
+		
+		function onMouseLeave( event ) 
+		{
+		    event.preventDefault();
+ 			
+			tf.onMouseUp(event);	
+			draw();		
+        }
+         
+        let oldY=0;
+		 
+        function onMouseMove(event) 
+		{
+			event.preventDefault();
+		    let mouseX = event.clientX -  tfCanvas.offsetLeft;
+		    let mouseY = event.clientY -  tfCanvas.offsetTop;
+		    let dy = (event.clientY-oldY); 
+			
+			tf.onMouseMove(event, mouseX, mouseY, dy); 
+			
+		    draw();
+		     
+		    oldY = event.clientY;
+			
+			//tf.copyTextureToContext(ctx2, 256, 1);
+			let imgData = ctx2.getImageData(0, 0, 256, 1);	
+			tf.copyTextureToContextData(imgData.data);
+			ctx2.putImageData(imgData, 0, 0);
+			 
+			cmtextures[ 'editor' ].needsUpdate = true; 
+			render();
+	    }
+	 
+        function onNewColor(color) 
+		{ 
+            let col = new RGBColor(color.toString());
+            if(col.ok) 
+			{ 
+                if(tf.lastPoint!=-1) 
+				{
+                    tf.points[tf.lastPoint].color = "rgba("+col.r+","+col.g+","+col.b+",1)";
+                    draw(); 
+                }
+            }
+			tf.setPicking(false); 
+			//tf.copyTextureToContext(ctx2, 256, 1);
+			
+			let imgData = ctx2.getImageData(0, 0, 256, 1);	
+			tf.copyTextureToContextData(imgData.data);
+			ctx2.putImageData(imgData, 0, 0);
+			
+			cmtextures[ 'editor' ].needsUpdate = true;
+			
+			render();
+        }
+		
+		function onPickStart()
+		{
+			tf.setPicking(true); 
+		}
+		
+		function changeTF(index)
+		{
+			//alert(index);
+			tf.loadPreset(index);
+			let imgData = ctx2.getImageData(0, 0, 256, 1);	
+			tf.copyTextureToContextData(imgData.data);
+			ctx2.putImageData(imgData, 0, 0);
+			
+			cmtextures[ 'editor' ].needsUpdate = true;
+			
+			render();
+			draw();
+		}
+		
+	</script>
+	
+	<table style="height: 100%;width: 100%" border="0" cellpadding="0" cellspacing="0">
+		<tbody>
+			<tr>
+				<td id="leftPanel" bgcolor="#cccccc" width="25%" VALIGN="top" >
+					<fieldset>
+				    <legend>Options</legend>
+				    	 
+						    <fieldset>
+						        <legend>Inputs</legend>								    
+								    Show Grid<input type="checkbox" checked onchange="toggleGrid();" /><br />
+								    Auto Rotate <input type="checkbox" onchange="process(this.checked);" /> <br />
+								    Shading     <input type="checkbox" onchange="toggleShading(this.checked);" />
+								<fieldset>
+						            <legend>Datasets</legend>
+
+						            <input type="radio"  name="dataset" value="0" checked onchange="onNewDataset(0);" />Aorta <br />
+						            <input type="radio"  name="dataset" value="1" onchange="onNewDataset(1);" />CTHead<br />
+						            <input type="radio"  name="dataset" value="2" onchange="onNewDataset(2);" />Skull<br />
+						            <input type="radio"  name="dataset" value="3" onchange="onNewDataset(3);" />Visible Male Head<br />
+
+						        </fieldset>
+
+
+						        <fieldset>
+						            <legend>Transfer Function</legend>
+						            <canvas id="tfCanvas" > </canvas>
+									<br>
+	                           	    &nbsp;Current color:&nbsp<input id="colorPicker" type="button" class="color {pickerClosable:true}" onchange="onNewColor(this.color)" >
+									<br>
+									&nbsp;Presets:&nbsp 
+									<select id="presets" onchange="changeTF(this.selectedIndex);">
+										<option value="CUSTOM" selected>Custom</option>
+										<option value="FIRE">Fire</option>
+										<option value="GRAY">GrayScale</option> 
+										<option value="JET">Jet</option> 
+										<option value="MEVIS">MeVis</option>
+										<option value="VIRIDIS">Viridis</option>
+									</select> 
+	                           	    
+    						    </fieldset>
+
+						    </fieldset>
+
+						    <fieldset>
+						        <legend>Output Logs</legend>
+						    	    <span id="log">Log:</span>
+						    </fieldset>
+					     
+					</fieldset>
+				</td>
+				<td id="rightPanel">
+					<canvas id="renderCanvas" style="border:none;"> </canvas>
+				</td>
+			</tr>
+		</tbody>
+	</table>
+</body>
+</html>
